@@ -2,6 +2,7 @@ import os
 import re
 import datetime  # Import datetime for date operations
 from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn
+from openai import AzureOpenAI
 
 def sanitize_filename(name, max_length=50, max_words=5):
     """Sanitize the filename by removing unwanted words and characters."""
@@ -120,7 +121,7 @@ def process_files_by_type(file_paths, output_path, dry_run=False, silent=False, 
 
     return operations
 
-def compute_operations(data_list, new_path, renamed_files, processed_files):
+def compute_operations(data_list, new_path, renamed_files, processed_files, client):
     """Compute the file operations based on generated metadata."""
     operations = []
     for data in data_list:
@@ -158,6 +159,16 @@ def compute_operations(data_list, new_path, renamed_files, processed_files):
         }
         operations.append(operation)
         renamed_files.add(new_file_path)
+
+    # If you need to use the Azure OpenAI client for any additional processing,
+    # you can use it here. For example:
+    # response = client.chat.completions.create(
+    #     model="gpt-3.5-turbo",
+    #     messages=[
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "Some prompt"}
+    #     ]
+    # )
 
     return operations  # Return the list of operations for display or further processing
 

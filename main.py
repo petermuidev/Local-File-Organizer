@@ -1,5 +1,9 @@
 import os
 import time
+from dotenv import load_dotenv
+from llm_utils import get_llm_response, get_text_llm, get_vision_llm
+import groq
+import requests
 
 from file_utils import (
     display_directory_tree,
@@ -20,11 +24,11 @@ from text_data_processing import (
 )
 
 from image_data_processing import (
+    process_single_image,
     process_image_files
 )
 
 from output_filter import filter_specific_output  # Import the context manager
-from nexa.gguf import NexaVLMInference, NexaTextInference  # Import model classes
 
 def ensure_nltk_data():
     """Ensure that NLTK data is downloaded efficiently and quietly."""
@@ -33,50 +37,39 @@ def ensure_nltk_data():
     nltk.download('punkt', quiet=True)
     nltk.download('wordnet', quiet=True)
 
-# Initialize models
-image_inference = None
-text_inference = None
+# Load environment variables
+load_dotenv()
 
-def initialize_models():
+# Initialize GROQ client for vision tasks
+groq_client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+# Initialize DeepInfra client for text tasks
+DEEPINFRA_API_KEY = os.getenv("DEEPINFRA_API_KEY")
+DEEPINFRA_MODEL = get_text_llm("deepinfra")
+
+# Initialize DeepSeek client for text tasks
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = get_text_llm("deepseek")
+
+def deepinfra_chat_completion(prompt):
+    return get_llm_response(DEEPINFRA_MODEL, prompt)
+
+def deepseek_chat_completion(prompt):
+    return get_llm_response(DEEPSEEK_MODEL, prompt)
+
+def initialize_models(text_llm_provider, vision_llm_provider):
     """Initialize the models if they haven't been initialized yet."""
-    global image_inference, text_inference
-    if image_inference is None or text_inference is None:
-        # Initialize the models
-        model_path = "llava-v1.6-vicuna-7b:q4_0"
-        model_path_text = "Llama3.2-3B-Instruct:q3_K_M"
+    print("**----------------------------------------------**")
+    print(f"**       Text LLM (DeepInfra): {DEEPINFRA_MODEL}**")
+    print(f"**       Text LLM (DeepSeek): {DEEPSEEK_MODEL}  **")
+    print(f"**       Vision LLM: {get_vision_llm(vision_llm_provider)}         **")
+    print("**----------------------------------------------**")
 
-        # Use the filter_specific_output context manager
-        with filter_specific_output():
-            # Initialize the image inference model
-            image_inference = NexaVLMInference(
-                model_path=model_path,
-                local_path=None,
-                stop_words=[],
-                temperature=0.3,
-                max_new_tokens=3000,
-                top_k=3,
-                top_p=0.2,
-                profiling=False
-                # add n_ctx if out of context window usage: n_ctx=2048
-            )
+# Load environment variables
+load_dotenv()
 
-            # Initialize the text inference model
-            text_inference = NexaTextInference(
-                model_path=model_path_text,
-                local_path=None,
-                stop_words=[],
-                temperature=0.5,
-                max_new_tokens=3000,  # Adjust as needed
-                top_k=3,
-                top_p=0.3,
-                profiling=False
-                # add n_ctx if out of context window usage: n_ctx=2048
-
-            )
-        print("**----------------------------------------------**")
-        print("**       Image inference model initialized      **")
-        print("**       Text inference model initialized       **")
-        print("**----------------------------------------------**")
+# Initialize GROQ client
+client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 def simulate_directory_tree(operations, base_path):
     """Simulate the directory tree based on the proposed operations."""
@@ -133,6 +126,47 @@ def get_mode_selection():
             return 'type'
         else:
             print("Invalid selection. Please enter 1, 2, or 3. To exit, type '/exit'.")
+
+def get_text_llm_selection():
+    """Prompt the user to select an LLM for text processing."""
+    while True:
+        print("Please choose the LLM for text processing:")
+        print("1. DeepInfra (Qwen/Qwen2.5-72B-Instruct)")
+        print("2. DeepSeek")
+        response = input("Enter 1 or 2 (or type '/exit' to exit): ").strip()
+        if response == '/exit':
+            print("Exiting program.")
+            exit()
+        elif response == '1':
+            return "deepinfra"
+        elif response == '2':
+            return "deepseek"
+        else:
+            print("Invalid selection. Please enter 1 or 2. To exit, type '/exit'.")
+
+def get_vision_llm_selection():
+    """Prompt the user to select an LLM for vision processing."""
+    while True:
+        print("Please choose the LLM for vision processing:")
+        print("1. GROQ (llama-3.2-11b-vision-preview)")
+        print("2. OpenAI (GPT-4 Vision)")
+        response = input("Enter 1 or 2 (or type '/exit' to exit): ").strip()
+        if response == '/exit':
+            print("Exiting program.")
+            exit()
+        elif response == '1':
+            return "groq"
+        elif response == '2':
+            return "openai"
+        else:
+            print("Invalid selection. Please enter 1 or 2. To exit, type '/exit'.")
+
+def get_text_llm_wrapper(text_llm_provider):
+    """Wrapper function to call get_llm_response with the correct arguments for text processing."""
+    def wrapper(prompt):
+        text_model = get_text_llm(text_llm_provider)
+        return get_llm_response(text_model, prompt, provider=text_llm_provider)
+    return wrapper
 
 def main():
     # Ensure NLTK data is downloaded efficiently and quietly
@@ -197,7 +231,7 @@ def main():
         file_paths = collect_file_paths(input_path)
         end_time = time.time()
 
-        message = f"Time taken to load file paths: {end_time - start_time:.2f} seconds"
+        message = f"Time taken to collect file paths: {end_time - start_time:.2f} seconds"
         if silent_mode:
             with open(log_file, 'a') as f:
                 f.write(message + '\n')
@@ -218,12 +252,16 @@ def main():
                 # Proceed with content mode
                 # Initialize models once
                 if not silent_mode:
-                    print("Checking if the model is already downloaded. If not, downloading it now.")
-                initialize_models()
+                    print("Initializing AI models for processing...")
+                
+                text_llm_provider = get_text_llm_selection()
+                vision_llm_provider = get_vision_llm_selection()
+                
+                initialize_models(text_llm_provider, vision_llm_provider)
 
                 if not silent_mode:
                     print("*" * 50)
-                    print("The file upload was successful. Processing may take a few minutes.")
+                    print("File paths collected successfully. Processing may take a few minutes.")
                     print("*" * 50)
 
                 # Prepare to collect link type statistics
@@ -232,11 +270,14 @@ def main():
                 # Separate files by type
                 image_files, text_files = separate_files_by_type(file_paths)
 
+                # Create the text_llm_wrapper with the selected provider
+                text_llm_wrapper = get_text_llm_wrapper(text_llm_provider)
+
                 # Prepare text tuples for processing
                 text_tuples = []
                 for fp in text_files:
                     # Use read_file_data to read the file content
-                    text_content = read_file_data(fp)
+                    text_content = read_file_data(fp, text_llm_wrapper)
                     if text_content is None:
                         message = f"Unsupported or unreadable text file format: {fp}"
                         if silent_mode:
@@ -248,8 +289,9 @@ def main():
                     text_tuples.append((fp, text_content))
 
                 # Process files sequentially
-                data_images = process_image_files(image_files, image_inference, text_inference, silent=silent_mode, log_file=log_file)
-                data_texts = process_text_files(text_tuples, text_inference, silent=silent_mode, log_file=log_file)
+                data_images = process_image_files(image_files, groq_client, vision_llm_provider, silent=silent_mode, log_file=log_file)
+
+                data_texts = process_text_files(text_tuples, text_llm_wrapper, silent=silent_mode, log_file=log_file)
 
                 # Prepare for copying and renaming
                 renamed_files = set()
@@ -263,7 +305,8 @@ def main():
                     all_data,
                     output_path,
                     renamed_files,
-                    processed_files
+                    processed_files,
+                    client  # Pass the client to compute_operations
                 )
 
             elif mode == 'date':
